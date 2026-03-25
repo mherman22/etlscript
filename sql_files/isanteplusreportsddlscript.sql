@@ -34,6 +34,8 @@ CREATE TABLE if not exists `patient` (
   `last_inserted_date` datetime DEFAULT NULL,
   `last_updated_date` datetime DEFAULT NULL,
   `transferred_in` int(11),
+  `date_transferred_in` datetime DEFAULT NULL,
+  `date_started_arv_other_site` datetime DEFAULT NULL,
   PRIMARY KEY (`patient_id`),
   KEY `location_id` (`location_id`),
   CONSTRAINT `patient_ibfk_1` FOREIGN KEY (`location_id`) REFERENCES openmrs.`location`(`location_id`)
@@ -42,9 +44,9 @@ CREATE TABLE if not exists `patient` (
 CREATE TABLE  if not exists `patient_visit` (
   `visit_date` date DEFAULT NULL,
   `visit_id` int(11),
-  `encounter_id` int(11) DEFAULT NULL,
-  `location_id` int(11) DEFAULT NULL,
-  `patient_id` int(11),
+  `encounter_id` int(11) NOT NULL,
+  `location_id` int(11) NOT NULL,
+  `patient_id` int(11) NOT NULL,
   `start_date` date DEFAULT NULL,
   `stop_date` date DEFAULT NULL,
   `creator` varchar(20) DEFAULT NULL,
@@ -110,6 +112,7 @@ CREATE TABLE IF NOT EXISTS patient_dispensing (
 	next_dispensation_date Date,
 	dispensation_location int(11) default 0,
 	arv_drug int(11) default 1066, /*1066=No, 1065=YES*/
+	ddp int(11) default 1066,
 	rx_or_prophy int(11),
 	last_updated_date DATETIME,
 	CONSTRAINT pk_patient_dispensing PRIMARY KEY(encounter_id,location_id,drug_id),
@@ -288,6 +291,7 @@ CREATE TABLE IF NOT EXISTS patient_prescription (
 		comment_test_done text,
 		order_destination  varchar(50),
     	test_name text,
+		creation_date DATETIME,
 		last_updated_date DATETIME,
 		CONSTRAINT pk_patient_laboratory PRIMARY KEY (patient_id,encounter_id,test_id),
 		INDEX(visit_date),
