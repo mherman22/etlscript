@@ -11,18 +11,26 @@ cd etlscript
 ```
 
 2. Run the initial load (creates tables, runs full ETL, sets up cron):
+
+**Bare-metal MySQL:**
 ```bash
 ./load.sh <mysql_user> <mysql_password> <mysql_host> <mysql_port>
 ```
 
-Example:
+**Docker MySQL:**
+```bash
+./load.sh --docker <container_name> <mysql_user> <mysql_password>
+```
+
+Examples:
 ```bash
 ./load.sh root Admin123 localhost 3306
+./load.sh --docker mysql_mysql.1 root Admin123
 ```
 
 This runs all 7 SQL scripts in sequence, then sets up cron jobs for the two incremental ETL scripts that need to run periodically.
 
-**Note:** Requires `mysql` client and `flock` installed locally.
+**Requirements:** `mysql` client, `flock`, and `docker` (if using Docker mode).
 
 ### What gets scheduled
 
@@ -41,8 +49,11 @@ Logs are written to `/var/log/isanteplus-etl/`. Each run is protected by `flock`
 # Check what's scheduled
 crontab -l
 
-# Set up cron jobs manually (if not run via load.sh)
+# Set up cron jobs manually (bare-metal)
 ./setup-cron.sh <mysql_user> <mysql_password> <mysql_host> <mysql_port>
+
+# Set up cron jobs manually (Docker)
+./setup-cron.sh --docker <container_name> <mysql_user> <mysql_password>
 
 # Remove cron jobs
 ./remove-cron.sh
@@ -59,19 +70,3 @@ crontab -l
 | `insertion_obs_by_day.sql` | Every 10 min (cron) | Incremental daily ETL |
 | `patient_status_arv_dml.sql` | Once (initial) | Patient ARV status and alerts |
 | `indicators_report.sql` | Every 10 min (cron) | Surveillance indicator reports |
-
-### Docker
-
-If MySQL is running in Docker, pass the container's exposed host and port:
-
-```bash
-./load.sh root Admin123 127.0.0.1 3306
-```
-
-Or if using `docker exec` instead of TCP:
-
-```bash
-docker exec -i <mysql_container> mysql -uroot -pAdmin123 < sql_files/isanteplusreportsddlscript.sql
-# ... repeat for each script
-./setup-cron.sh root Admin123 127.0.0.1 3306
-```
