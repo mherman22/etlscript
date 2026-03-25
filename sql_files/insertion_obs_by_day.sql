@@ -1,7 +1,6 @@
-/*Creation des tables pour le jour en question*/
+/* Daily incremental ETL tables and queries */
 USE isanteplus;
 
-/* ---- Tables de jour (DDL) - créées si inexistantes ---- */
 
 CREATE TABLE IF NOT EXISTS obs_by_day(
   `obs_id` int(11) NOT NULL AUTO_INCREMENT,
@@ -114,18 +113,18 @@ CREATE TABLE IF NOT EXISTS last_obs(
 
 
 /*=============================================================================
-  PHASE 1: Snapshot des tables openmrs dans des tables temporaires
-  Utilisation de READ UNCOMMITTED pour éviter les verrous partagés
+
+
 =============================================================================*/
 
 SET SESSION TRANSACTION ISOLATION LEVEL READ UNCOMMITTED;
 SET SQL_SAFE_UPDATES = 0;
 
-/* Calculer les bornes du jour courant pour utiliser les index */
+/* Date range for today (sargable) */
 SET @today_start = CURDATE();
 SET @today_end = CURDATE() + INTERVAL 1 DAY;
 
-/* -- Snapshot openmrs.obs du jour -- */
+/* Snapshot: today's obs */
 DROP TEMPORARY TABLE IF EXISTS _tmp_obs;
 CREATE TEMPORARY TABLE _tmp_obs (
   obs_id int(11),
@@ -174,12 +173,12 @@ SELECT obs_id, person_id, concept_id, encounter_id, order_id, obs_datetime,
 FROM openmrs.obs
 WHERE date_created >= @today_start AND date_created < @today_end;
 
-/* Copie pour self-join (MySQL 5.6) */
+/* Duplicate for MySQL 5.6 self-join */
 DROP TEMPORARY TABLE IF EXISTS _tmp_obs_2;
 CREATE TEMPORARY TABLE _tmp_obs_2 LIKE _tmp_obs;
 INSERT INTO _tmp_obs_2 SELECT * FROM _tmp_obs;
 
-/* -- Snapshot openmrs.obs complet pour les requêtes exposed infants/status (besoin de tout) -- */
+/* Snapshot: full obs for exposed infants and status queries */
 DROP TEMPORARY TABLE IF EXISTS _tmp_obs_full;
 CREATE TEMPORARY TABLE _tmp_obs_full (
   obs_id int(11),
@@ -208,12 +207,12 @@ WHERE voided <> 1
   AND concept_id IN (1030, 844, 1401, 1667, 161555, 1282, 1271, 162087, 163540, 163541,
                      1444, 159368, 1443, 1276, 162549, 160742, 1442, 163711, 159394, 159946, 1284);
 
-/* Copie pour self-join */
+/* Duplicate for self-join */
 DROP TEMPORARY TABLE IF EXISTS _tmp_obs_full_2;
 CREATE TEMPORARY TABLE _tmp_obs_full_2 LIKE _tmp_obs_full;
 INSERT INTO _tmp_obs_full_2 SELECT * FROM _tmp_obs_full;
 
-/* -- Snapshot encounter -- */
+/* Snapshot: encounter */
 DROP TEMPORARY TABLE IF EXISTS _tmp_encounter;
 CREATE TEMPORARY TABLE _tmp_encounter (
   encounter_id int(11),
@@ -235,7 +234,7 @@ SELECT encounter_id, encounter_type, patient_id, location_id,
 FROM openmrs.encounter
 WHERE voided <> 1;
 
-/* -- Snapshot encounter_type -- */
+/* Snapshot: encounter_type */
 DROP TEMPORARY TABLE IF EXISTS _tmp_encounter_type;
 CREATE TEMPORARY TABLE _tmp_encounter_type (
   encounter_type_id int(11),
@@ -247,7 +246,7 @@ CREATE TEMPORARY TABLE _tmp_encounter_type (
 INSERT INTO _tmp_encounter_type
 SELECT encounter_type_id, uuid FROM openmrs.encounter_type;
 
-/* -- Snapshot visit -- */
+/* Snapshot: visit */
 DROP TEMPORARY TABLE IF EXISTS _tmp_visit;
 CREATE TEMPORARY TABLE _tmp_visit (
   visit_id int(11),
@@ -263,12 +262,12 @@ SELECT visit_id, patient_id, date_started, voided
 FROM openmrs.visit
 WHERE voided <> 1;
 
-/* Copie pour self-join */
+/* Duplicate for self-join */
 DROP TEMPORARY TABLE IF EXISTS _tmp_visit_2;
 CREATE TEMPORARY TABLE _tmp_visit_2 LIKE _tmp_visit;
 INSERT INTO _tmp_visit_2 SELECT * FROM _tmp_visit;
 
-/* -- Snapshot person_name, person, patient (du jour seulement) -- */
+/* Snapshot: person_name, person, patient */
 DROP TEMPORARY TABLE IF EXISTS _tmp_person_name;
 CREATE TEMPORARY TABLE _tmp_person_name (
   person_id int(11),
@@ -305,7 +304,7 @@ CREATE TEMPORARY TABLE _tmp_patient (
 INSERT INTO _tmp_patient
 SELECT patient_id, date_created FROM openmrs.patient;
 
-/* -- Snapshot concept (petit, MEMORY) -- */
+/* Snapshot: concept (MEMORY engine) */
 DROP TEMPORARY TABLE IF EXISTS _tmp_concept;
 CREATE TEMPORARY TABLE _tmp_concept (
   concept_id int(11),
@@ -316,10 +315,8 @@ CREATE TEMPORARY TABLE _tmp_concept (
 INSERT INTO _tmp_concept
 SELECT concept_id, uuid FROM openmrs.concept;
 
-/* -- Snapshot openmrs.isanteplus_patient_arv pour écriture finale -- */
-/* (On prend une copie pour la lecture, l'écriture se fera en une seule transaction à la fin) */
 
-/* Duplicates pour MySQL 5.6/5.7 (ne peut pas référencer une table temp 2x dans la même requête) */
+/* Duplicate temp tables for MySQL 5.6/5.7 self-join limitation */
 DROP TEMPORARY TABLE IF EXISTS _tmp_encounter_2;
 CREATE TEMPORARY TABLE _tmp_encounter_2 LIKE _tmp_encounter;
 INSERT INTO _tmp_encounter_2 SELECT * FROM _tmp_encounter;
@@ -328,16 +325,11 @@ DROP TEMPORARY TABLE IF EXISTS _tmp_encounter_type_2;
 CREATE TEMPORARY TABLE _tmp_encounter_type_2 LIKE _tmp_encounter_type;
 INSERT INTO _tmp_encounter_type_2 SELECT * FROM _tmp_encounter_type;
 
-/* Rétablir l'isolation par défaut pour les opérations restantes */
+
 SET SESSION TRANSACTION ISOLATION LEVEL REPEATABLE READ;
 COMMIT;
 
 
-/*=============================================================================
-  PHASE 2: ETL du jour - insertion obs_by_day
-=============================================================================*/
-
-/* Insertion obs du jour dans obs_by_day */
 INSERT INTO isanteplus.obs_by_day
 SELECT o.obs_id, o.person_id, o.concept_id, o.encounter_id, o.order_id, o.obs_datetime,
   o.location_id, o.obs_group_id, o.accession_number, o.value_group_id,
@@ -355,10 +347,6 @@ ON DUPLICATE KEY UPDATE
   value_text = o.value_text,
   voided = o.voided;
 
-
-/*=============================================================================
-  PHASE 3: Insertion patient du jour
-=============================================================================*/
 
 INSERT INTO patient
 (patient_id, given_name, family_name, gender, birthdate,
@@ -379,7 +367,7 @@ ON DUPLICATE KEY UPDATE
   last_updated_date = now(),
   voided = pn.voided;
 
-/* Mise à jour du statut VIH pour les patients du jour */
+/* Update HIV status for today's patients */
 UPDATE patient p
 INNER JOIN _tmp_encounter en ON p.patient_id = en.patient_id
 INNER JOIN _tmp_encounter_type ent ON en.encounter_type = ent.encounter_type_id
@@ -391,10 +379,6 @@ WHERE ent.uuid IN ('17536ba6-dd7c-4f58-8014-08c7cb798ac7',
 AND en.voided = 0
 AND p.date_created >= @today_start AND p.date_created < @today_end;
 
-
-/*=============================================================================
-  PHASE 4: Dispensing du jour
-=============================================================================*/
 
 INSERT INTO patient_dispensing_day
 (patient_id, encounter_id, location_id, drug_id, dispensation_date, last_updated_date, voided)
@@ -412,24 +396,24 @@ ON DUPLICATE KEY UPDATE
   last_updated_date = now(),
   voided = ob.voided;
 
-/* Mise à jour next_dispensation_date */
+/* Update next_dispensation_date */
 UPDATE patient_dispensing_day patdisp
 INNER JOIN isanteplus.obs_by_day ob ON patdisp.encounter_id = ob.encounter_id
 SET patdisp.next_dispensation_date = DATE(ob.value_datetime)
 WHERE ob.concept_id = 162549 AND ob.voided = 0;
 
-/* Mise à jour arv_drug */
+/* Update arv_drug */
 UPDATE patient_dispensing_day pdis
 INNER JOIN arv_drugs ad ON pdis.drug_id = ad.drug_id
 SET pdis.arv_drug = 1065;
 
-/* Mise à jour visit_id, visit_date (utilise snapshot) */
+/* Update visit_id, visit_date */
 UPDATE patient_dispensing_day patdisp
 INNER JOIN _tmp_encounter en ON patdisp.encounter_id = en.encounter_id
 INNER JOIN _tmp_visit vi ON en.visit_id = vi.visit_id
 SET patdisp.visit_id = vi.visit_id, patdisp.visit_date = vi.date_started;
 
-/* Mise à jour rx_or_prophy */
+/* Update rx_or_prophy */
 UPDATE isanteplus.patient_dispensing_day pdisp
 INNER JOIN isanteplus.obs_by_day ob1 ON pdisp.encounter_id = ob1.encounter_id
 INNER JOIN isanteplus.obs_by_day ob2 ON ob1.obs_id = ob2.obs_group_id
@@ -443,10 +427,6 @@ WHERE ob1.concept_id = 1442
   AND pdisp.drug_id = ob3.value_coded
   AND ob2.voided = 0;
 
-
-/*=============================================================================
-  PHASE 5: Prescription du jour
-=============================================================================*/
 
 INSERT INTO patient_prescription_day
 (patient_id, encounter_id, location_id, drug_id, dispense, last_updated_date, voided)
@@ -464,7 +444,7 @@ ON DUPLICATE KEY UPDATE
   last_updated_date = now(),
   voided = ob.voided;
 
-/* Insertion dispensation dans prescription */
+/* Insert dispensation into prescription */
 INSERT INTO patient_prescription_day
 (patient_id, encounter_id, location_id, drug_id, dispensation_date, dispense, last_updated_date, voided)
 SELECT DISTINCT ob.person_id, ob.encounter_id, ob.location_id, ob.value_coded,
@@ -482,18 +462,18 @@ ON DUPLICATE KEY UPDATE
   last_updated_date = now(),
   voided = ob.voided;
 
-/* Mise à jour visit pour prescription (snapshot) */
+/* Update visit for prescription */
 UPDATE patient_prescription_day patp
 INNER JOIN _tmp_encounter en ON patp.encounter_id = en.encounter_id
 INNER JOIN _tmp_visit vi ON en.visit_id = vi.visit_id
 SET patp.visit_id = vi.visit_id, patp.visit_date = vi.date_started;
 
-/* Mise à jour arv_drug pour prescription */
+/* Update arv_drug for prescription */
 UPDATE patient_prescription_day ppres
 INNER JOIN arv_drugs ad ON ppres.drug_id = ad.drug_id
 SET ppres.arv_drug = 1065;
 
-/* Mise à jour rx_or_prophy pour prescription */
+/* Update rx_or_prophy for prescription */
 UPDATE isanteplus.patient_prescription_day pp
 INNER JOIN isanteplus.obs_by_day ob1 ON pp.encounter_id = ob1.encounter_id
 INNER JOIN isanteplus.obs_by_day ob2 ON ob1.obs_id = ob2.obs_group_id
@@ -505,10 +485,6 @@ WHERE ob1.concept_id = 1442
   AND pp.drug_id = ob3.value_coded
   AND ob2.voided = 0;
 
-
-/*=============================================================================
-  PHASE 6: Laboratoire du jour (utilise snapshot encounter)
-=============================================================================*/
 
 INSERT INTO patient_laboratory
 (patient_id, encounter_id, location_id, test_id, last_updated_date, voided)
@@ -523,14 +499,14 @@ ON DUPLICATE KEY UPDATE
   last_updated_date = now(),
   voided = ob.voided;
 
-/* Mise à jour visit pour laboratoire (snapshot) */
+/* Update visit for laboratory */
 UPDATE patient_laboratory lab
 INNER JOIN _tmp_encounter en ON lab.encounter_id = en.encounter_id
 INNER JOIN _tmp_visit vi ON en.visit_id = vi.visit_id
 SET lab.visit_id = vi.visit_id, lab.visit_date = vi.date_started
 WHERE vi.voided = 0;
 
-/* Mise à jour résultats */
+/* Update results */
 UPDATE patient_laboratory plab
 INNER JOIN isanteplus.obs_by_day ob ON plab.test_id = ob.concept_id
   AND plab.encounter_id = ob.encounter_id
@@ -544,10 +520,6 @@ SET plab.test_done = 1,
   plab.comment_test_done = ob.comments
 WHERE ob.voided = 0;
 
-
-/*=============================================================================
-  PHASE 7: Tests virologiques (snapshot)
-=============================================================================*/
 
 INSERT INTO virological_tests
 (patient_id, encounter_id, location_id, concept_group, obs_group_id, test_id, answer_concept_id, last_updated_date, voided)
@@ -567,35 +539,35 @@ ON DUPLICATE KEY UPDATE
   last_updated_date = now(),
   voided = ob.voided;
 
-/* Mise à jour test_result PCR */
+/* Update PCR test_result */
 UPDATE virological_tests vtests
 INNER JOIN isanteplus.obs_by_day ob ON vtests.obs_group_id = ob.obs_group_id
   AND vtests.encounter_id = ob.encounter_id AND vtests.location_id = ob.location_id
 SET vtests.test_result = ob.value_coded
 WHERE ob.concept_id = 1030 AND ob.voided = 0;
 
-/* Mise à jour age PCR */
+/* Update PCR age */
 UPDATE virological_tests vtests
 INNER JOIN isanteplus.obs_by_day ob ON vtests.obs_group_id = ob.obs_group_id
   AND vtests.encounter_id = ob.encounter_id AND vtests.location_id = ob.location_id
 SET vtests.age = ob.value_numeric
 WHERE ob.concept_id = 163540 AND ob.voided = 0;
 
-/* Mise à jour age_unit PCR */
+/* Update PCR age_unit */
 UPDATE virological_tests vtests
 INNER JOIN isanteplus.obs_by_day ob ON vtests.obs_group_id = ob.obs_group_id
   AND vtests.encounter_id = ob.encounter_id AND vtests.location_id = ob.location_id
 SET vtests.age_unit = ob.value_coded
 WHERE ob.concept_id = 163541 AND ob.voided = 0;
 
-/* Mise à jour encounter_date (snapshot) */
+/* Update encounter_date */
 UPDATE virological_tests vtests
 INNER JOIN _tmp_encounter enc ON vtests.location_id = enc.location_id
   AND vtests.encounter_id = enc.encounter_id
 SET vtests.encounter_date = DATE(enc.encounter_datetime)
 WHERE enc.voided = 0;
 
-/* Mise à jour test_date */
+/* Update test_date */
 UPDATE virological_tests vtests
 INNER JOIN patient p ON vtests.patient_id = p.patient_id
 SET vtests.test_date = CASE
@@ -608,13 +580,9 @@ END
 WHERE vtests.test_id = 162087 AND vtests.answer_concept_id = 1030;
 
 
-/*=============================================================================
-  PHASE 8: Enfants exposés (snapshot - requêtes lourdes sur obs)
-=============================================================================*/
-
 TRUNCATE TABLE exposed_infants_day;
 
-/* Dernier PCR négatif */
+/* Last negative PCR */
 DROP TEMPORARY TABLE IF EXISTS patient_pcr_negative;
 CREATE TEMPORARY TABLE patient_pcr_negative (
   patient_id int(11),
@@ -656,7 +624,7 @@ WHERE (ppn.concept_id = 1030 AND ppn.value_coded = 664)
 
 DROP TEMPORARY TABLE IF EXISTS patient_pcr_negative;
 
-/* Condition B - Enfant exposé coché (snapshot) */
+/* Condition B - Exposed infant checked */
 INSERT INTO exposed_infants_day (patient_id, location_id, encounter_id, visit_date, condition_exposee)
 SELECT DISTINCT ob.person_id, ob.location_id, ob.encounter_id,
   DATE(enc.encounter_datetime), 3
@@ -667,7 +635,7 @@ WHERE ob.concept_id = 1401 AND ob.value_coded = 1405
   AND ob.voided <> 1
   AND ent.uuid IN ('349ae0b4-65c1-4122-aa06-480f186c8350', '33491314-c352-42d0-bd5d-a9d0bffc9bf1');
 
-/* Condition D - ARV en prophylaxie */
+/* Condition D - ARV prophylaxis */
 INSERT INTO exposed_infants_day (patient_id, location_id, encounter_id, visit_date, condition_exposee)
 SELECT DISTINCT pdisp.patient_id, pdisp.location_id, pdisp.encounter_id, pdisp.visit_date, 4
 FROM patient_dispensing pdisp
@@ -681,7 +649,7 @@ WHERE pdisp.rx_or_prophy = 163768
   AND pdisp.arv_drug = 1065
   AND pdisp.voided <> 1;
 
-/* Supprimer patients avec PCR positif (snapshot) */
+/* Remove patients with positive PCR */
 DROP TEMPORARY TABLE IF EXISTS patient_pcr_positif;
 CREATE TEMPORARY TABLE patient_pcr_positif (
   patient_id int(11),
@@ -703,7 +671,7 @@ INNER JOIN patient_pcr_positif ON exposed_infants_day.patient_id = patient_pcr_p
 
 DROP TEMPORARY TABLE IF EXISTS patient_pcr_positif;
 
-/* Supprimer HIV positif confirmé > 18 mois */
+/* Remove confirmed HIV positive > 18 months */
 DELETE exposed_infants_day FROM exposed_infants_day
 INNER JOIN (
   SELECT pl.patient_id FROM patient_laboratory pl
@@ -713,7 +681,7 @@ INNER JOIN (
     AND TIMESTAMPDIFF(MONTH, p.birthdate, DATE(now())) >= 18
 ) C ON exposed_infants_day.patient_id = C.patient_id;
 
-/* Supprimer VIH positif confirmé sérologique (snapshot) */
+/* Remove confirmed HIV positive by serology */
 DELETE exposed_infants_day FROM exposed_infants_day
 INNER JOIN (
   SELECT DISTINCT ob.person_id
@@ -725,7 +693,7 @@ INNER JOIN (
     AND ent.uuid IN ('349ae0b4-65c1-4122-aa06-480f186c8350', '33491314-c352-42d0-bd5d-a9d0bffc9bf1')
 ) C ON exposed_infants_day.patient_id = C.person_id;
 
-/* Condition 5 - Séroréversion (snapshot) */
+/* Condition 5 - Seroreversion */
 INSERT INTO exposed_infants_day (patient_id, location_id, encounter_id, visit_date, condition_exposee)
 SELECT DISTINCT ob.person_id, ob.location_id, ob.encounter_id,
   DATE(enc.encounter_datetime), 5
@@ -737,11 +705,7 @@ WHERE ob.concept_id = 1667 AND ob.value_coded = 165439
   AND ent.uuid = '9d0113c6-f23a-4461-8428-7e9a7344f2ba';
 
 
-/*=============================================================================
-  PHASE 9: Statut ARV du jour (snapshot)
-=============================================================================*/
-
-/* Pré-calculer la dernière visite par patient */
+/* Pre-compute latest visit per patient */
 DROP TEMPORARY TABLE IF EXISTS _tmp_latest_visit;
 CREATE TEMPORARY TABLE _tmp_latest_visit (
   patient_id int(11),
@@ -754,7 +718,7 @@ SELECT patient_id, MAX(DATE(date_started))
 FROM _tmp_visit WHERE voided = 0
 GROUP BY patient_id;
 
-/* Décédés en Pré-ARV = 4 */
+/* Deceased pre-ARV = 4 */
 INSERT INTO patient_status_arv_day (patient_id, id_status, start_date, encounter_id, last_updated_date, date_started_status)
 SELECT v.patient_id, 4, DATE(v.date_started), enc.encounter_id, now(), now()
 FROM isanteplus.patient ispat
@@ -771,7 +735,7 @@ WHERE entype.uuid = '9d0113c6-f23a-4461-8428-7e9a7344f2ba'
 GROUP BY v.patient_id
 ON DUPLICATE KEY UPDATE last_updated_date = VALUES(last_updated_date);
 
-/* Transférés en Pré-ARV = 5 */
+/* Transferred pre-ARV = 5 */
 INSERT INTO patient_status_arv_day (patient_id, id_status, start_date, encounter_id, last_updated_date, date_started_status)
 SELECT v.patient_id, 5, DATE(v.date_started), enc.encounter_id, now(), now()
 FROM isanteplus.patient ispat
@@ -788,7 +752,7 @@ WHERE entype.uuid = '9d0113c6-f23a-4461-8428-7e9a7344f2ba'
 GROUP BY v.patient_id
 ON DUPLICATE KEY UPDATE last_updated_date = VALUES(last_updated_date);
 
-/* Réguliers = 6 */
+/* Regular = 6 */
 INSERT INTO patient_status_arv_day (patient_id, id_status, start_date, encounter_id, last_updated_date, date_started_status)
 SELECT pdis.patient_id, 6, MAX(DATE(pdis.visit_date)), pdis.encounter_id, now(), now()
 FROM isanteplus.patient ipat
@@ -810,7 +774,7 @@ WHERE enc.patient_id NOT IN (
 GROUP BY pdis.patient_id
 ON DUPLICATE KEY UPDATE last_updated_date = VALUES(last_updated_date);
 
-/* Rendez-vous ratés = 8 */
+/* Missed appointments = 8 */
 INSERT INTO patient_status_arv_day (patient_id, id_status, start_date, encounter_id, last_updated_date, date_started_status)
 SELECT pdis.patient_id, 8, MAX(DATE(pdis.visit_date)), pdis.encounter_id, now(), now()
 FROM isanteplus.patient ipat
@@ -833,7 +797,7 @@ WHERE enc.patient_id NOT IN (
 GROUP BY pdis.patient_id
 ON DUPLICATE KEY UPDATE last_updated_date = VALUES(last_updated_date);
 
-/* Perdus de vue = 9 */
+/* Lost to follow-up = 9 */
 INSERT INTO patient_status_arv_day (patient_id, id_status, start_date, encounter_id, last_updated_date, date_started_status)
 SELECT pdis.patient_id, 9, MAX(DATE(pdis.visit_date)), pdis.encounter_id, now(), now()
 FROM isanteplus.patient_dispensing_day pdis
@@ -855,7 +819,7 @@ WHERE enc.patient_id NOT IN (
 GROUP BY pdis.patient_id
 ON DUPLICATE KEY UPDATE last_updated_date = VALUES(last_updated_date);
 
-/* Perdus de vue en Pré-ARV = 10 */
+/* Lost to follow-up pre-ARV = 10 */
 INSERT INTO patient_status_arv_day (patient_id, id_status, start_date, encounter_id, last_updated_date, date_started_status)
 SELECT v.patient_id, 10, MAX(DATE(v.date_started)), enc.encounter_id, now(), now()
 FROM isanteplus.patient ispat
@@ -894,7 +858,7 @@ WHERE enc.patient_id NOT IN (
 GROUP BY v.patient_id
 ON DUPLICATE KEY UPDATE last_updated_date = VALUES(last_updated_date);
 
-/* Actifs en Pré-ARV = 11 */
+/* Active pre-ARV = 11 */
 INSERT INTO patient_status_arv_day (patient_id, id_status, start_date, encounter_id, last_updated_date, date_started_status)
 SELECT v.patient_id, 11, MAX(DATE(v.date_started)), enc.encounter_id, now(), now()
 FROM isanteplus.patient ispat
@@ -914,7 +878,7 @@ WHERE enc.patient_id NOT IN (
 GROUP BY v.patient_id
 ON DUPLICATE KEY UPDATE last_updated_date = VALUES(last_updated_date);
 
-/* Décédés = 1 (utilise obs_by_day + snapshot encounter) */
+/* Deceased = 1 */
 INSERT INTO patient_status_arv_day (patient_id, id_status, start_date, encounter_id, last_updated_date, date_started_status)
 SELECT enc.patient_id, 1, MAX(DATE(enc.encounter_datetime)), enc.encounter_id, now(), now()
 FROM _tmp_encounter enc
@@ -927,7 +891,7 @@ WHERE entype.uuid = '9d0113c6-f23a-4461-8428-7e9a7344f2ba'
 GROUP BY enc.patient_id
 ON DUPLICATE KEY UPDATE last_updated_date = VALUES(last_updated_date);
 
-/* Transférés = 2 */
+/* Transferred = 2 */
 INSERT INTO patient_status_arv_day (patient_id, id_status, start_date, encounter_id, last_updated_date, date_started_status)
 SELECT enc.patient_id, 2, MAX(DATE(enc.encounter_datetime)), enc.encounter_id, now(), now()
 FROM _tmp_encounter enc
@@ -940,7 +904,7 @@ WHERE entype.uuid = '9d0113c6-f23a-4461-8428-7e9a7344f2ba'
 GROUP BY enc.patient_id
 ON DUPLICATE KEY UPDATE last_updated_date = VALUES(last_updated_date);
 
-/* Arrêtés = 3 */
+/* Stopped = 3 */
 INSERT INTO patient_status_arv_day (patient_id, id_status, start_date, encounter_id, last_updated_date, date_started_status)
 SELECT enc.patient_id, 3, MAX(DATE(enc.encounter_datetime)), enc.encounter_id, now(), now()
 FROM _tmp_encounter enc
@@ -956,21 +920,17 @@ GROUP BY enc.patient_id
 ON DUPLICATE KEY UPDATE last_updated_date = VALUES(last_updated_date);
 
 
-/*=============================================================================
-  PHASE 10: Finalisation statut ARV
-=============================================================================*/
-
-/* Mise à jour raison d'arrêt */
+/* Update discontinuation reason */
 UPDATE patient_status_arv_day psarv
 INNER JOIN discontinuation_reason dreason ON psarv.patient_id = dreason.patient_id
 SET psarv.dis_reason = dreason.reason
 WHERE psarv.start_date <= dreason.visit_date;
 
-/* Supprimer enfants exposés du statut ARV */
+/* Remove exposed infants from ARV status */
 DELETE patient_status_arv_day FROM patient_status_arv_day
 INNER JOIN exposed_infants_day ON patient_status_arv_day.patient_id = exposed_infants_day.patient_id;
 
-/* Mise à jour statut dans la table patient */
+/* Update status in patient table */
 UPDATE patient p
 INNER JOIN patient_status_arv_day psa ON p.patient_id = psa.patient_id
 INNER JOIN (
@@ -979,7 +939,7 @@ INNER JOIN (
 ) B ON psa.patient_id = B.patient_id AND DATE(psa.last_updated_date) = DATE(B.last_updated_date)
 SET p.arv_status = psa.id_status;
 
-/* Transfert vers patient_status_arv permanent */
+/* Transfer to permanent patient_status_arv */
 DELETE patient_status_arv FROM patient_status_arv
 INNER JOIN patient_status_arv_day psad
   ON patient_status_arv.patient_id = psad.patient_id
@@ -994,10 +954,6 @@ FROM patient_status_arv_day ps
 GROUP BY ps.patient_id
 ON DUPLICATE KEY UPDATE last_updated_date = VALUES(last_updated_date);
 
-
-/*=============================================================================
-  PHASE 11: Regimen PEPFAR du jour
-=============================================================================*/
 
 INSERT INTO last_obs (obs_id, last_updated_date)
 SELECT MAX(obs_id), now() FROM obs_by_day
@@ -1069,11 +1025,7 @@ DROP TEMPORARY TABLE IF EXISTS twoDrugRegimenPrefixTemp_day;
 DROP TEMPORARY TABLE IF EXISTS pepfarTableTemp_day;
 
 
-/*=============================================================================
-  PHASE 12: Écriture vers openmrs (transaction courte et ciblée)
-=============================================================================*/
-
-/* Écriture des données regimen vers openmrs.isanteplus_patient_arv */
+/* Write regimen data to openmrs.isanteplus_patient_arv */
 INSERT INTO openmrs.isanteplus_patient_arv (patient_id, arv_regimen, date_created, date_changed)
 SELECT pft.patient_id, pft.regimen, pft.visit_date, now()
 FROM pepfarTable pft
@@ -1086,7 +1038,7 @@ ON DUPLICATE KEY UPDATE
   arv_regimen = pft.regimen,
   date_changed = now();
 
-/* Écriture statut ARV vers openmrs.isanteplus_patient_arv */
+/* Write ARV status to openmrs.isanteplus_patient_arv */
 INSERT INTO openmrs.isanteplus_patient_arv
 (patient_id, arv_status, date_started_arv, next_visit_date, date_created, date_changed)
 SELECT p.patient_id, asl.name_fr, DATE(p.date_started_arv),
@@ -1104,17 +1056,13 @@ ON DUPLICATE KEY UPDATE
   date_changed = now();
 
 
-/*=============================================================================
-  PHASE 13: Nettoyage
-=============================================================================*/
-
 TRUNCATE TABLE patient_dispensing_day;
 TRUNCATE TABLE patient_prescription_day;
 TRUNCATE TABLE patient_status_arv_day;
 TRUNCATE TABLE last_obs;
 TRUNCATE TABLE obs_by_day;
 
-/* Nettoyage tables temporaires */
+/* Clean up temp tables */
 DROP TEMPORARY TABLE IF EXISTS _tmp_obs;
 DROP TEMPORARY TABLE IF EXISTS _tmp_obs_2;
 DROP TEMPORARY TABLE IF EXISTS _tmp_obs_full;
@@ -1130,34 +1078,20 @@ DROP TEMPORARY TABLE IF EXISTS _tmp_concept;
 DROP TEMPORARY TABLE IF EXISTS _tmp_latest_visit;
 
 
-/*=============================================================================
-  EVENT: Exécution toutes les 10 minutes
-  Note: L'EVENT appelle maintenant un script plat via source ou
-  peut être remplacé par un cron externe pour plus de contrôle.
-
-  Pour utiliser avec un EVENT MySQL, encapsuler dans une procédure:
-=============================================================================*/
+/* EVENT: disabled. Use external cron instead. */
 
 DELIMITER $$
 DROP PROCEDURE IF EXISTS call_all_procedure_day_v2$$
 CREATE PROCEDURE call_all_procedure_day_v2()
 BEGIN
-  /* Cette procédure est un wrapper pour l'EVENT scheduler.
-     Le contenu réel est dans le script plat ci-dessus.
-     Pour l'utiliser avec l'EVENT, le script doit être chargé
-     en tant que procédure stockée ou appelé via un cron externe.
-
-     Recommandation: utiliser un cron externe au lieu de l'EVENT MySQL
-     pour un meilleur contrôle et monitoring.
-  */
   SELECT 'Use external cron or load script directly' AS note;
 END$$
 DELIMITER ;
 
-/* Désactiver l'ancien EVENT */
+/* Disable the old EVENT */
 DROP EVENT IF EXISTS patient_status_arv_day_event;
 
-/* Créer le nouvel EVENT (optionnel - préférer un cron externe) */
+/* Create new EVENT (optional - prefer external cron) */
 /*
 CREATE EVENT IF NOT EXISTS patient_status_arv_day_event_v2
 ON SCHEDULE EVERY 10 MINUTE
