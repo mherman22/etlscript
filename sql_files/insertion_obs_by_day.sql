@@ -1,19 +1,4 @@
-/*=============================================================================
-  insertion_obs_by_day_v2.sql
-
-  Réécriture pour réduire la contention sur les tables openmrs.
-  Approche: snapshot des tables openmrs dans des tables temporaires,
-  puis travail uniquement sur les tables temporaires.
-
-  Changements par rapport à la version originale:
-  - READ UNCOMMITTED pour les lectures openmrs (pas de verrous partagés)
-  - Snapshot des tables openmrs.obs, encounter, visit, person, patient,
-    person_name, encounter_type dans des tables temporaires
-  - Remplacement de toutes les références openmrs.* par _tmp_*
-  - Suppression des procédures stockées (SQL plat)
-  - Tables temporaires dupliquées pour MySQL 5.6 (pas de self-join)
-  - DATE(column) remplacé par des comparaisons avec >= et < pour utiliser les index
-=============================================================================*/
+/*Creation des tables pour le jour en question*/
 USE isanteplus;
 
 /* ---- Tables de jour (DDL) - créées si inexistantes ---- */
