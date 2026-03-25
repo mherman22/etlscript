@@ -2,24 +2,53 @@
 
 set -e
 
-user=$1
-pass=$2
-host=$3
-port=$4
-
-if [ -z "$user" ] || [ -z "$pass" ] || [ -z "$host" ] || [ -z "$port" ]; then
-    echo "Usage: ./setup-cron.sh <mysql_user> <mysql_password> <mysql_host> <mysql_port>"
+usage() {
+    echo "Usage:"
+    echo "  Bare-metal:  ./setup-cron.sh <mysql_user> <mysql_password> <mysql_host> <mysql_port>"
+    echo "  Docker:      ./setup-cron.sh --docker <container_name> <mysql_user> <mysql_password>"
+    echo ""
+    echo "Examples:"
+    echo "  ./setup-cron.sh root Admin123 localhost 3306"
+    echo "  ./setup-cron.sh --docker mysql_mysql.1 root Admin123"
     exit 1
-fi
+}
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 SQL_DIR="${SCRIPT_DIR}/sql_files"
 LOG_DIR="/var/log/isanteplus-etl"
 CRON_ID="# isanteplus-etl"
+DOCKER_MODE=false
 
-MYSQL_CMD="mysql --protocol=tcp -h ${host} -P ${port} -u ${user} -p${pass}"
+if [ "$1" = "--docker" ]; then
+    DOCKER_MODE=true
+    container=$2
+    user=$3
+    pass=$4
+
+    if [ -z "$container" ] || [ -z "$user" ] || [ -z "$pass" ]; then
+        usage
+    fi
+
+    MYSQL_CMD="docker exec -i ${container} mysql -u${user} -p${pass}"
+else
+    user=$1
+    pass=$2
+    host=$3
+    port=$4
+
+    if [ -z "$user" ] || [ -z "$pass" ] || [ -z "$host" ] || [ -z "$port" ]; then
+        usage
+    fi
+
+    MYSQL_CMD="mysql --protocol=tcp -h ${host} -P ${port} -u ${user} -p${pass}"
+fi
 
 echo "=== Setting up ETL cron jobs ==="
+if [ "$DOCKER_MODE" = true ]; then
+    echo "Mode: Docker (container: ${container})"
+else
+    echo "Mode: Bare-metal (host: ${host}:${port})"
+fi
 
 # Create log directory
 mkdir -p "${LOG_DIR}" 2>/dev/null || sudo mkdir -p "${LOG_DIR}"
