@@ -1,7 +1,5 @@
 #!/bin/bash
 
-set -e
-
 usage() {
     echo "Usage:"
     echo "  Bare-metal:  ./load.sh <mysql_user> <mysql_password> <mysql_host> <mysql_port>"
